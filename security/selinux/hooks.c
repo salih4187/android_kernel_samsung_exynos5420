@@ -1927,9 +1927,6 @@ static int selinux_binder_transaction(const struct cred *from, const struct cred
 
 static int selinux_binder_transfer_binder(const struct cred *from, const struct cred *to)
 {
-	u32 fromsid = task_sid(from);
-	u32 tosid = task_sid(to);
-
 	return avc_has_perm(cred_sid(from), cred_sid(to), SECCLASS_BINDER, BINDER__TRANSFER, NULL);
 }
 
