@@ -25,28 +25,29 @@
 #define CPUID_EXT_ISAR4	"c2, 4"
 #define CPUID_EXT_ISAR5	"c2, 5"
 
-/* ARM implemented processors */
-#define ARM_CPU_PART_ARM1136		0x4100b360
-#define ARM_CPU_PART_ARM1156		0x4100b560
-#define ARM_CPU_PART_ARM1176		0x4100b760
-#define ARM_CPU_PART_ARM11MPCORE	0x4100b020
-#define ARM_CPU_PART_CORTEX_A8		0x4100c080
-#define ARM_CPU_PART_CORTEX_A9		0x4100c090
-#define ARM_CPU_PART_CORTEX_A5		0x4100c050
-#define ARM_CPU_PART_CORTEX_A7		0x4100c070
-#define ARM_CPU_PART_CORTEX_A12		0x4100c0d0
-#define ARM_CPU_PART_CORTEX_A17		0x4100c0e0
-#define ARM_CPU_PART_CORTEX_A15		0x4100c0f0
-#define ARM_CPU_PART_CORTEX_A53		0x4100d030
-#define ARM_CPU_PART_CORTEX_A57		0x4100d070
-#define ARM_CPU_PART_CORTEX_A72		0x4100d080
-#define ARM_CPU_PART_CORTEX_A73		0x4100d090
-#define ARM_CPU_PART_CORTEX_A75		0x4100d0a0
-#define ARM_CPU_PART_MASK		0xff00fff0
+#define MPIDR_SMP_BITMASK (0x3 << 30)
+#define MPIDR_SMP_VALUE (0x2 << 30)
 
-/* Broadcom implemented processors */
-#define ARM_CPU_PART_BRAHMA_B15		0x420000f0
-#define ARM_CPU_PART_BRAHMA_B53		0x42001000
+#define MPIDR_MT_BITMASK (0x1 << 24)
+
+#define MPIDR_HWID_BITMASK 0xFFFFFF
+
+#define MPIDR_INVALID (~MPIDR_HWID_BITMASK)
+
+#define MPIDR_LEVEL0_MASK 0x3
+#define MPIDR_LEVEL0_SHIFT 0
+
+#define MPIDR_LEVEL1_MASK 0xF
+#define MPIDR_LEVEL1_SHIFT 8
+
+#define MPIDR_LEVEL2_MASK 0xFF
+#define MPIDR_LEVEL2_SHIFT 16
+
+#define MPIDR_LEVEL_BITS 8
+#define MPIDR_LEVEL_MASK ((1 << MPIDR_LEVEL_BITS) - 1)
+
+#define MPIDR_AFFINITY_LEVEL(mpidr, level) \
+	((mpidr >> (MPIDR_LEVEL_BITS * level)) & MPIDR_LEVEL_MASK)
 
 extern unsigned int processor_id;
 
@@ -74,6 +75,54 @@ extern unsigned int processor_id;
 #define read_cpuid_ext(reg) 0
 #endif
 
+#if defined(CONFIG_EXYNOS5_MP) || defined(CONFIG_BL_SWITCHER)
+static inline unsigned int read_cpuid_id(void)
+{
+	return read_cpuid(CPUID_ID);
+}
+
+static inline unsigned int read_cpuid_cachetype(void)
+{
+	return read_cpuid(CPUID_CACHETYPE);
+}
+
+static inline unsigned int read_cpuid_tcmstatus(void)
+{
+	return read_cpuid(CPUID_TCM);
+}
+
+static inline unsigned int read_cpuid_mpidr(void)
+{
+	return read_cpuid(CPUID_MPIDR);
+}
+
+#define CPU_NUM_IN_CLUSTER 4
+#define CLUSTER_NUM 2
+#include <mach/regs-pmu.h>
+#include <asm/io.h>
+
+static inline unsigned int cpuid_to_hw(int cpuid)
+{
+	return (cpuid + CPU_NUM_IN_CLUSTER) %
+		(CPU_NUM_IN_CLUSTER * CLUSTER_NUM);
+}
+
+static inline unsigned int is_cpu_on(int cpuid)
+{
+	return (__raw_readl(EXYNOS_ARM_CORE_STATUS
+			(cpuid_to_hw(cpuid))) & 0xf) ? 1 : 0;
+}
+
+static inline unsigned int get_clusterid(int cpuid)
+{
+	return (cpuid_to_hw(cpuid) < CPU_NUM_IN_CLUSTER) ? 0 : 1;
+}
+
+static inline unsigned int get_first_cpuid(int clusterid)
+{
+	return (clusterid == 0) ? CPU_NUM_IN_CLUSTER : 0;
+}
+#else
 /*
  * The CPU ID never changes at run time, so we might as well tell the
  * compiler that it's constant.  Use this function to read the CPU ID
@@ -98,16 +147,7 @@ static inline unsigned int __attribute_const__ read_cpuid_mpidr(void)
 {
 	return read_cpuid(CPUID_MPIDR);
 }
-
-/*
- * The CPU part number is meaningless without referring to the CPU
- * implementer: implementers are free to define their own part numbers
- * which are permitted to clash with other implementer part numbers.
- */
-static inline unsigned int __attribute_const__ read_cpuid_part(void)
-{
-	return read_cpuid_id() & ARM_CPU_PART_MASK;
-}
+#endif
 
 /*
  * Intel's XScale3 core supports some v6 features (supersections, L2)

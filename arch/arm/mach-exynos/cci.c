@@ -12,9 +12,12 @@
 #include <linux/io.h>
 #include <linux/errno.h>
 #include <linux/cache.h>
+#include <linux/device.h>
 #include <linux/syscore_ops.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include <asm/cacheflush.h>
 
 #include <plat/cpu.h>
@@ -22,6 +25,7 @@
 
 #include <mach/map.h>
 #include <mach/regs-cci.h>
+#include <mach/smc.h>
 
 static void __iomem *cci_base;
 static void __iomem *core_misc_base;
@@ -122,6 +126,7 @@ void disable_cci_snoops(unsigned int cluster_id)
 	return;
 }
 
+#if defined(CONFIG_PM)
 static int get_cci_snoop_status(unsigned int cluster_id)
 {
 	void __iomem *control_reg;
@@ -142,6 +147,7 @@ static int get_cci_snoop_status(unsigned int cluster_id)
 
 	return 0;
 }
+#endif
 
 /*
  * Use our own MPIDR accessors as the generic ones in asm/cputype.h have
@@ -181,9 +187,25 @@ static void cci_resume(void)
 		return;
 	}
 
-	for (i = 0; i < 2; i++)
-		if (cci_status[i])
-			enable_cci_snoops(i);
+	if (soc_is_exynos5420()) {
+		exynos_smc(SMC_CMD_REG,
+			SMC_REG_ID_SFR_W(EXYNOS5_PA_CCI + SECURE_ACCESS_REG),
+			1,
+			0);
+	}
+
+#ifdef CONFIG_EXYNOS5_MP
+	if (soc_is_exynos5420()) {
+		for_each_cpu(i, cpu_coregroup_mask(4))
+			__raw_writel(HOTPLUG | CHECK_CCI_SNOOP, S5P_VA_SYSRAM_NS + 0x18 + 4 * i);
+	}
+#endif
+
+	if (soc_is_exynos5420()) {
+		for (i = 0; i < 2; i++)
+			if (cci_status[i])
+				enable_cci_snoops(i);
+	}
 }
 #else
 #define cci_suspend NULL
@@ -273,8 +295,17 @@ static int __init cci_init(void)
 	int err;
 
 #if defined(CONFIG_EXYNOS5_CCI)
-	if (soc_is_exynos5410() || soc_is_exynos5420())
+	if (soc_is_exynos5410() || soc_is_exynos5420() || soc_is_exynos5260())
 		cci_enabled = 1;
+#endif
+
+#ifdef CONFIG_EXYNOS5_CCI
+	if (soc_is_exynos5420()) {
+		exynos_smc(SMC_CMD_REG,
+			   SMC_REG_ID_SFR_W(EXYNOS5_PA_CCI + SECURE_ACCESS_REG),
+			   1,
+			   0);
+	}
 #endif
 
 	if (!cci_enabled) {
@@ -303,6 +334,10 @@ static int __init cci_init(void)
 	}
 
 	enable_cci_snoops(cluster_id);
+#ifdef CONFIG_EXYNOS5_MP
+	if (soc_is_exynos5420())
+		enable_cci_snoops(!cluster_id);
+#endif
 
 disabled:
 	register_syscore_ops(&cci_syscore_ops);
@@ -315,4 +350,58 @@ out:
 	return err;
 }
 
-arch_initcall(cci_init);
+early_initcall(cci_init);
+
+#ifdef CONFIG_EXYNOS5_CCI
+static struct bus_type cci_subsys = {
+	.name = "cci",
+	.dev_name = "cci",
+};
+
+static ssize_t cci_snoop_status_show(struct kobject *kobj,
+                        struct kobj_attribute *attr, char *buf)
+{
+	ssize_t n = 0;
+	int s_if;
+
+	for (s_if = 1; s_if <= 5; s_if++) {
+		unsigned int v;
+		v = __raw_readl(cci_base + (s_if * 0x1000));
+		v &= 0x3;
+		n += scnprintf(buf + n, 35, "CCI SLAVE IF %d - %d\n",
+						(s_if -1), v ? 1 : 0);
+	}
+
+	return n;
+}
+
+static struct kobj_attribute cci_snoop_status_attr =
+	__ATTR(snoop_status, 0644, cci_snoop_status_show, NULL);
+
+static struct attribute *cci_sysfs_attrs[] = {
+	&cci_snoop_status_attr.attr,
+	NULL,
+};
+
+static struct attribute_group cci_sysfs_group = {
+	.attrs = cci_sysfs_attrs,
+};
+
+static const struct attribute_group *cci_sysfs_groups[] = {
+	&cci_sysfs_group,
+	NULL,
+};
+
+static int __init cci_sysfs_init(void)
+{
+	int ret = 0;
+
+	ret = subsys_system_register(&cci_subsys, cci_sysfs_groups);
+	if (ret)
+		pr_err("Fail to register cci subsys\n");
+
+	return ret;
+}
+
+late_initcall(cci_sysfs_init);
+#endif

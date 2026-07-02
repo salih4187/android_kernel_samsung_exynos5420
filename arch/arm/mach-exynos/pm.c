@@ -204,7 +204,11 @@ static int exynos_cpu_suspend(unsigned long arg)
 #endif
 
 	if (soc_is_exynos5420()) {
+#ifdef CONFIG_SCHED_HMP
+		for (i = 0; i < 4; i++) {
+#else
 		for (i = 0; i < NR_CPUS; i++) {
+#endif
 			if (i == 0)
 				continue;
 
@@ -237,7 +241,11 @@ static int exynos_cpu_suspend(unsigned long arg)
 			EXYNOS_CENTRAL_SEQ_OPTION);
 		exynos_lpi_mask_ctrl(false);
 	} else if (soc_is_exynos5420()) {
+#ifdef CONFIG_SCHED_HMP
+		for (i = 0; i < 4; i++) {
+#else
 		for (i = 0; i < NR_CPUS; i++) {
+#endif
 			if (i == 0)
 				continue;
 
@@ -548,6 +556,23 @@ static int exynos_pm_suspend(void)
 	unsigned long tmp;
 	unsigned int cluster_id;
 
+#ifdef CONFIG_EXYNOS5_MP
+	if (soc_is_exynos5420()) {
+		unsigned int count = 10000;
+
+		do {
+			tmp = __raw_readl(EXYNOS_COMMON_STATUS(0)) & 0x3;
+			udelay(10);
+			count--;
+		} while (tmp && count);
+
+		if (count == 0) {
+			pr_err("Non-cpu block of A15 cluster is powered on\n");
+			return -EAGAIN;
+		}
+	}
+#endif
+
 	if (soc_is_exynos5420())
 		s3c_pm_do_save(exynos5420_core_save, ARRAY_SIZE(exynos5420_core_save));
 
@@ -736,9 +761,16 @@ static void exynos_pm_resume(void)
 
 early_wakeup:
 #ifdef CONFIG_CPU_IDLE
-	if (soc_is_exynos5410() || soc_is_exynos5420()) {
+	if (soc_is_exynos5410()) {
 		exynos_enable_idle_clock_down(KFC);
 		exynos_enable_idle_clock_down(ARM);
+	} else if (soc_is_exynos5420()) {
+#if defined(CONFIG_EXYNOS5_MP)
+		exynos_disable_idle_clock_down(ARM);
+		exynos_disable_idle_clock_down(KFC);
+#else
+		exynos_enable_idle_clock_down(KFC);
+#endif
 	}
 #endif
 	if (!(soc_is_exynos5410() || soc_is_exynos5420())) {

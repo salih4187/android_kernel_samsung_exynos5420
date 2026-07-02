@@ -366,6 +366,9 @@ extern struct cpufreq_governor cpufreq_gov_conservative;
 #define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_conservative)
 #elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVE)
 extern struct cpufreq_governor cpufreq_gov_interactive;
+extern struct cpufreq_governor cpufreq_gov_interactive_eagle;
+extern unsigned int cpufreq_interactive_get_hispeed_freq(void);
+extern unsigned int cpufreq_interactive_eagle_get_hispeed_freq(void);
 #define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_interactive)
 #endif
 

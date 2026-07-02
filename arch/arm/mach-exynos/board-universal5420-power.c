@@ -20,11 +20,35 @@ static struct platform_device samsung_device_battery = {
 };
 #endif
 
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+struct cpumask mp_cluster_cpus[CA_END];
+
+static void __init init_mp_cpumask_set(void)
+{
+	unsigned int i;
+
+	for_each_cpu(i, cpu_possible_mask) {
+		if (exynos_boot_cluster == CA7) {
+			if (i >= NR_CA7)
+				cpumask_set_cpu(i, &mp_cluster_cpus[CA15]);
+			else
+				cpumask_set_cpu(i, &mp_cluster_cpus[CA7]);
+		} else {
+			if (i >= NR_CA15)
+				cpumask_set_cpu(i, &mp_cluster_cpus[CA7]);
+			else
+				cpumask_set_cpu(i, &mp_cluster_cpus[CA15]);
+		}
+	}
+}
+#endif
+
+#ifdef CONFIG_EXYNOS_THERMAL
 static struct exynos_tmu_platform_data exynos5_tmu_data = {
-	.trigger_levels[0] = 75,
-	.trigger_levels[1] = 90,
-	.trigger_levels[2] = 110,
-	.trigger_levels[3] = 115,
+	.trigger_levels[0] = 80,
+	.trigger_levels[1] = 85,
+	.trigger_levels[2] = 100,
+	.trigger_levels[3] = 110,
 	.trigger_level0_en = 1,
 	.trigger_level1_en = 1,
 	.trigger_level2_en = 1,
@@ -35,26 +59,39 @@ static struct exynos_tmu_platform_data exynos5_tmu_data = {
 	.cal_type = TYPE_ONE_POINT_TRIMMING,
 	.efuse_value = 55,
 	.freq_tab[0] = {
-		.freq_clip_max = 1800 * 1000,
-		.temp_level = 75,
+		.freq_clip_max = 1700 * 1000,
+		.temp_level = 80,
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+		.mask_val = &mp_cluster_cpus[CA15],
+#endif
 	},
 	.freq_tab[1] = {
-		.freq_clip_max = 1700 * 1000,
-		.temp_level = 90,
+		.freq_clip_max = 1500 * 1000,
+		.temp_level = 85,
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+		.mask_val = &mp_cluster_cpus[CA15],
+#endif
 	},
 	.freq_tab[2] = {
 		.freq_clip_max = 1200 * 1000,
-		.temp_level = 95,
+		.temp_level = 90,
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+		.mask_val = &mp_cluster_cpus[CA15],
+#endif
 	},
 	.freq_tab[3] = {
 		.freq_clip_max = 600 * 1000,
 		.temp_level = 100,
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+		.mask_val = &mp_cluster_cpus[CA15],
+#endif
 	},
 	.size[THERMAL_TRIP_ACTIVE] = 1,
 	.size[THERMAL_TRIP_PASSIVE] = 3,
 	.freq_tab_count = 4,
 	.type = SOC_ARCH_EXYNOS5,
 };
+#endif
 
 #ifdef CONFIG_ARM_EXYNOS5420_BUS_DEVFREQ
 static struct platform_device exynos5_mif_devfreq = {
@@ -112,4 +149,7 @@ void __init exynos5_universal5420_power_init(void)
 
 	platform_add_devices(universal5420_power_devices,
 			ARRAY_SIZE(universal5420_power_devices));
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+	init_mp_cpumask_set();
+#endif
 }

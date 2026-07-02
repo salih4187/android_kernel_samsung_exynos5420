@@ -88,17 +88,6 @@ ENTRY(cpu_v7_dcache_clean_area)
 	mov	pc, lr
 ENDPROC(cpu_v7_dcache_clean_area)
 
-ENTRY(cpu_v7_iciallu_switch_mm)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c5, 0		@ ICIALLU
-	b	cpu_v7_switch_mm
-ENDPROC(cpu_v7_iciallu_switch_mm)
-ENTRY(cpu_v7_bpiall_switch_mm)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c5, 6		@ flush BTAC/BTB
-	b	cpu_v7_switch_mm
-ENDPROC(cpu_v7_bpiall_switch_mm)
-
 	string	cpu_v7_name, "ARMv7 Processor"
 	.align
 
@@ -107,7 +96,7 @@ ENDPROC(cpu_v7_bpiall_switch_mm)
 .equ	cpu_v7_suspend_size, 4 * 8
 #ifdef CONFIG_ARM_CPU_SUSPEND
 ENTRY(cpu_v7_do_suspend)
-	stmfd	sp!, {r4 - r11, lr}
+	stmfd	sp!, {r4 - r10, lr}
 	mrc	p15, 0, r4, c13, c0, 0	@ FCSE/PID
 	mrc	p15, 0, r5, c13, c0, 3	@ User r/o thread ID
 	stmia	r0!, {r4 - r5}
@@ -118,7 +107,7 @@ ENTRY(cpu_v7_do_suspend)
 	mrc	p15, 0, r9, c1, c0, 1	@ Auxiliary control register
 	mrc	p15, 0, r10, c1, c0, 2	@ Co-processor access control
 	stmia	r0, {r6 - r11}
-	ldmfd	sp!, {r4 - r11, pc}
+	ldmfd	sp!, {r4 - r10, pc}
 ENDPROC(cpu_v7_do_suspend)
 
 ENTRY(cpu_v7_do_resume)
@@ -139,16 +128,15 @@ ENTRY(cpu_v7_do_resume)
 	mcr	p15, 0, r7, c2, c0, 1	@ TTB 1
 	mcr	p15, 0, r11, c2, c0, 2	@ TTB control register
 #ifdef CONFIG_BL_SWITCHER
-	sub     r4, r0, #8
-	stmia   r4, {r0-r3, r5, r6, r10, lr}
-	bl      cpu_v7_setup_cp15
-	ldmia   r4, {r0-r3, r5, r6, r10, lr}
+	sub	r4, r0, #8
+	stmia	r4, {r0-r3, r5, r6, r10, lr}
+	bl	cpu_v7_setup_cp15
+	ldmia	r4, {r0-r3, r5, r6, r10, lr}
 #else
 	mrc	p15, 0, r4, c1, c0, 1	@ Read Auxiliary control register
 	teq	r4, r9			@ Is it already set?
 	mcrne	p15, 0, r9, c1, c0, 1	@ No, so write it
 #endif
-
 	mcr	p15, 0, r10, c1, c0, 2	@ Co-processor access control
 	ldr	r4, =PRRR		@ PRRR
 	ldr	r5, =NMRR		@ NMRR
@@ -291,46 +279,47 @@ ENDPROC(cpu_v7_setup_cp15)
 	__CPUINIT
 
 /*
- *     __v7_setup
+ *	__v7_setup
  *
- *     Initialise TLB, Caches, and MMU state ready to switch the MMU
- *     on.  Return in r0 the new CP15 C1 control register setting.
+ *	Initialise TLB, Caches, and MMU state ready to switch the MMU
+ *	on.  Return in r0 the new CP15 C1 control register setting.
  *
- *     This should be able to cover all ARMv7 cores.
+ *	This should be able to cover all ARMv7 cores.
  *
- *     It is assumed that:
- *     - cache type register is implemented
+ *	It is assumed that:
+ *	- cache type register is implemented
  */
 __v7_ca5mp_setup:
 __v7_ca9mp_setup:
-	mov     r10, #(1 << 0)                  @ TLB ops broadcasting
-	b       1f
+	mov	r10, #(1 << 0)			@ TLB ops broadcasting
+	b	1f
 __v7_ca7mp_setup:
 __v7_ca15mp_setup:
-	mov     r10, #0
+	mov	r10, #0
 1:
 #ifdef CONFIG_SMP
-	ALT_SMP(mrc     p15, 0, r0, c1, c0, 1)
-	ALT_UP(mov      r0, #(1 << 6))          @ fake it for UP
-	tst     r0, #(1 << 6)                   @ SMP/nAMP mode enabled?
-	orreq   r0, r0, #(1 << 6)               @ Enable SMP/nAMP mode
-	orreq   r0, r0, r10                     @ Enable CPU-specific SMP bits
-	mcreq   p15, 0, r0, c1, c0, 1
+	ALT_SMP(mrc	p15, 0, r0, c1, c0, 1)
+	ALT_UP(mov	r0, #(1 << 6))		@ fake it for UP
+	tst	r0, #(1 << 6)			@ SMP/nAMP mode enabled?
+	orreq	r0, r0, #(1 << 6)		@ Enable SMP/nAMP mode
+	orreq	r0, r0, r10			@ Enable CPU-specific SMP bits
+	mcreq	p15, 0, r0, c1, c0, 1
 #endif
 __v7_setup:
-	adr     r12, __v7_setup_stack           @ the local stack
-	stmia   r12, {r0-r5, r7, r9, r11, lr}
+	adr	r12, __v7_setup_stack		@ the local stack
+	stmia	r12, {r0-r5, r7, r9, r11, lr}
 	mrc     p15, 1, r0, c0, c0, 1
 	ubfx    r0, r0, #21, #3
 	bl      v7_flush_dcache_level
-	ldmia   r12, {r0-r5, r7, r9, r11, lr}
+	ldmia	r12, {r0-r5, r7, r9, r11, lr}
 
-	stmia   r12, {r0-r3, r5, r6, r10, lr}
-	bl      cpu_v7_setup_cp15
-	ldmia   r12, {r0-r3, r5, r6, r10, lr}
+	stmia	r12, {r0-r3, r5, r6, r10, lr}
+	bl	cpu_v7_setup_cp15
+	ldmia	r12, {r0-r3, r5, r6, r10, lr}
 
-	mov     r10, #0
+	mov	r10, #0
 	mcr	p15, 0, r10, c7, c5, 0		@ I+BTB cache invalidate
+	dsb
 #ifdef CONFIG_MMU
 	mcr	p15, 0, r10, c8, c7, 0		@ invalidate I + D TLBs
 	v7_ttb_setup r10, r4, r8, r5		@ TTBCR, TTBRx setup
@@ -339,7 +328,6 @@ __v7_setup:
 	mcr	p15, 0, r5, c10, c2, 0		@ write PRRR
 	mcr	p15, 0, r6, c10, c2, 1		@ write NMRR
 #endif
-	dsb					@ Complete invalidations
 #ifndef CONFIG_ARM_THUMBEE
 	mrc	p15, 0, r0, c0, c1, 0		@ read ID_PFR0 for ThumbEE
 	and	r0, r0, #(0xf << 12)		@ ThumbEE enabled field
@@ -374,47 +362,8 @@ __v7_setup_stack:
 
 	__INITDATA
 
-	.weak cpu_v7_bugs_init
-
 	@ define struct processor (see <asm/proc-fns.h> and proc-macros.S)
-	define_processor_functions v7, dabort=v7_early_abort, pabort=v7_pabort, suspend=1, bugs=cpu_v7_bugs_init
-
-#ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
-	@ generic v7 bpiall on context switch
-	globl_equ	cpu_v7_bpiall_proc_init,	cpu_v7_proc_init
-	globl_equ	cpu_v7_bpiall_proc_fin,		cpu_v7_proc_fin
-	globl_equ	cpu_v7_bpiall_reset,		cpu_v7_reset
-	globl_equ	cpu_v7_bpiall_do_idle,		cpu_v7_do_idle
-	globl_equ	cpu_v7_bpiall_dcache_clean_area, cpu_v7_dcache_clean_area
-	globl_equ	cpu_v7_bpiall_set_pte_ext,	cpu_v7_set_pte_ext
-	globl_equ	cpu_v7_bpiall_suspend_size,	cpu_v7_suspend_size
-#ifdef CONFIG_ARM_CPU_SUSPEND
-	globl_equ	cpu_v7_bpiall_do_suspend,	cpu_v7_do_suspend
-	globl_equ	cpu_v7_bpiall_do_resume,	cpu_v7_do_resume
-#endif
-	define_processor_functions v7_bpiall, dabort=v7_early_abort, pabort=v7_pabort, suspend=1, bugs=cpu_v7_bugs_init
-
-#define HARDENED_BPIALL_PROCESSOR_FUNCTIONS v7_bpiall_processor_functions
-#else
-#define HARDENED_BPIALL_PROCESSOR_FUNCTIONS v7_processor_functions
-#endif
-
-	@ Cortex-A15 - needs iciallu switch_mm for hardening
-	globl_equ	cpu_ca15_proc_init,	cpu_v7_proc_init
-	globl_equ	cpu_ca15_proc_fin,	cpu_v7_proc_fin
-	globl_equ	cpu_ca15_reset,		cpu_v7_reset
-	globl_equ	cpu_ca15_do_idle,	cpu_v7_do_idle
-	globl_equ	cpu_ca15_dcache_clean_area, cpu_v7_dcache_clean_area
-#ifdef CONFIG_HARDEN_BRANCH_PREDICTOR
-	globl_equ	cpu_ca15_switch_mm,	cpu_v7_iciallu_switch_mm
-#else
-	globl_equ	cpu_ca15_switch_mm,	cpu_v7_switch_mm
-#endif
-	globl_equ	cpu_ca15_set_pte_ext,	cpu_v7_set_pte_ext
-	globl_equ	cpu_ca15_suspend_size,	cpu_v7_suspend_size
-	globl_equ	cpu_ca15_do_suspend,	cpu_v7_do_suspend
-	globl_equ	cpu_ca15_do_resume,	cpu_v7_do_resume
-	define_processor_functions ca15, dabort=v7_early_abort, pabort=v7_pabort, suspend=1, bugs=cpu_v7_ca15_ibe
+	define_processor_functions v7, dabort=v7_early_abort, pabort=v7_pabort, suspend=1
 
 	.section ".rodata"
 
@@ -427,7 +376,7 @@ __v7_setup_stack:
 	/*
 	 * Standard v7 proc info content
 	 */
-.macro __v7_proc initfunc, mm_mmuflags = 0, io_mmuflags = 0, hwcaps = 0, proc_fns = v7_processor_functions
+.macro __v7_proc initfunc, mm_mmuflags = 0, io_mmuflags = 0, hwcaps = 0
 	ALT_SMP(.long	PMD_TYPE_SECT | PMD_SECT_AP_WRITE | PMD_SECT_AP_READ | \
 			PMD_SECT_AF | PMD_FLAGS_SMP | \mm_mmuflags)
 	ALT_UP(.long	PMD_TYPE_SECT | PMD_SECT_AP_WRITE | PMD_SECT_AP_READ | \
@@ -440,7 +389,7 @@ __v7_setup_stack:
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB | HWCAP_FAST_MULT | \
 		HWCAP_EDSP | HWCAP_TLS | \hwcaps
 	.long	cpu_v7_name
-	.long	\proc_fns
+	.long	v7_processor_functions
 	.long	v7wbi_tlb_fns
 	.long	v6_user_fns
 	.long	v7_cache_fns
@@ -485,7 +434,7 @@ __v7_ca7mp_proc_info:
 __v7_ca15mp_proc_info:
 	.long	0x410fc0f0
 	.long	0xff0ffff0
-	__v7_proc __v7_ca15mp_setup, hwcaps = HWCAP_IDIV, proc_fns = ca15_processor_functions
+	__v7_proc __v7_ca15mp_setup, hwcaps = HWCAP_IDIV
 	.size	__v7_ca15mp_proc_info, . - __v7_ca15mp_proc_info
 
 	/*

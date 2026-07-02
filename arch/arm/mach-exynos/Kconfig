@@ -101,6 +101,16 @@ config SOC_EXYNOS5420
 	select PM_GENERIC_DOMAINS if PM_RUNTIME
 	help
 	  Enable EXYNOS5420 SoC support
+
+config EXYNOS5_MP
+	bool "Enable MP support"
+	default y
+	depends on (SOC_EXYNOS5260 || SOC_EXYNOS5420)
+	help
+	  Enables all cores which are not symmetric
+	  (2 A15 cores and 4 A7 cores in EXYNOS5260,
+	  4 A15 cores and 4 A7 cores in EXYNOS5420)
+
 config EXYNOS4_MCT
 	bool
 	default y

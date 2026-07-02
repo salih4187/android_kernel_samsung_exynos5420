@@ -69,6 +69,17 @@ config ARM_EXYNOS_IKS_CPUFREQ
 	  EXYNOS SoCs.
 
 	  If in doubt, say N.
+
+config ARM_EXYNOS_MP_CPUFREQ
+	bool "SAMSUNG EXYNOS SoCs for MP"
+	depends on ARCH_EXYNOS
+	depends on SCHED_HMP
+	help
+	  This adds the MP CPUFreq driver common part for Samsung
+	  EXYNOS SoCs.
+
+	  If in doubt, say N.
+
 endchoice
 
 choice

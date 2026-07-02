@@ -10,6 +10,8 @@
  * published by the Free Software Foundation.
 */
 
+#include <linux/notifier.h>
+
 enum cpufreq_level_index {
 	L0, L1, L2, L3, L4,
 	L5, L6, L7, L8, L9,
@@ -26,15 +28,27 @@ struct exynos_dvfs_info {
 	unsigned int	min_support_idx;
 	unsigned int	cluster_num;
 	unsigned int	boot_freq;
+	unsigned int	boot_cpu_min_qos;
+	unsigned int	boot_cpu_max_qos;
+	int		boot_freq_idx;
+	int		*bus_table;
 	bool		blocked;
 	struct clk	*cpu_clk;
 	unsigned int	*volt_table;
+	unsigned int	*abb_table;
 	const unsigned int	*max_op_freqs;
 	struct cpufreq_frequency_table	*freq_table;
 	struct regulator *regulator;
 	void (*set_freq)(unsigned int, unsigned int);
 	void (*set_ema)(unsigned int);
 	bool (*need_apll_change)(unsigned int, unsigned int);
+	bool (*is_alive)(void);
+};
+
+struct cpufreq_clkdiv {
+	unsigned int    index;
+	unsigned int    clkdiv;
+	unsigned int    clkdiv1;
 };
 
 #if defined(CONFIG_ARCH_EXYNOS4)
@@ -75,6 +89,24 @@ extern int exynos5_cpufreq_CA15_init(struct exynos_dvfs_info *);
 extern void exynos_thermal_throttle(void);
 extern void exynos_thermal_unthrottle(void);
 
+/* CPUFREQ init events */
+#define CPUFREQ_INIT_COMPLETE	0x0001
+
+#if defined(CONFIG_ARM_EXYNOS_MP_CPUFREQ) || defined(CONFIG_ARM_EXYNOS_CPUFREQ)
+extern int exynos_cpufreq_init_register_notifier(struct notifier_block *nb);
+extern int exynos_cpufreq_init_unregister_notifier(struct notifier_block *nb);
+#else
+static inline int exynos_cpufreq_init_register_notifier(struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int exynos_cpufreq_init_unregister_notifier(struct notifier_block *nb)
+{
+	return 0;
+}
+#endif
+
 #if defined(CONFIG_ARCH_EXYNOS5)
 /*
  * CPU usage threshold value to determine changing from b to L
@@ -105,6 +137,15 @@ enum op_state {
 	RESUME,		/* Re-enabling DVFS using direct API after resume */
 };
 
+#if defined(CONFIG_ARM_EXYNOS5420_CPUFREQ)
+#define COLD_VOLT_OFFSET        37500
+#define ENABLE_MIN_COLD         1
+#define LIMIT_COLD_VOLTAGE      1250000
+#define MIN_COLD_VOLTAGE        950000
+#define NR_CA7		4
+#define NR_CA15		4
+#endif
+
 /*
  * Keep frequency value for counterpart cluster DVFS
  * cur, min, max : Frequency (KHz),
@@ -119,12 +160,14 @@ struct cpu_info_alter {
 	cluster_type c_id;
 };
 
+extern cluster_type exynos_boot_cluster;
 extern unsigned int exynos_cpufreq_direct_scale(unsigned int target_freq,
 						unsigned int curr_freq,
 						enum op_state state);
 extern int exynos_init_bL_info(struct cpu_info_alter *info);
-#ifdef CONFIG_EXYNOS5_DYNAMIC_CPU_HOTPLUG
-extern void dm_cpu_hotplug_init(void);
+
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+extern void (*disable_c3_idle)(bool disable);
 #endif
 
 #if defined(CONFIG_ARM_EXYNOS_IKS_CPUFREQ) || defined(CONFIG_ARM_EXYNOS_CPUFREQ)
@@ -136,4 +179,25 @@ extern struct mutex cpufreq_lock;
 static inline void reset_lpj_for_cluster(cluster_type cluster) {}
 static inline void exynos_lowpower_for_cluster(cluster_type cluster, bool on) {}
 #endif
+#if defined(CONFIG_SCHED_HMP) && defined(CONFIG_EXYNOS5_DYNAMIC_CPU_HOTPLUG)
+int big_cores_hotplug(bool out_flag);
+void event_hotplug_in(void);
+bool is_big_hotpluged(void);
+#else
+static inline int big_cores_hotplug(bool out_flag)
+{
+	return 0;
+}
+
+static inline void event_hotplug_in(void)
+{
+	return;
+}
+
+static inline bool is_big_hotpluged(void)
+{
+	return 0;
+}
+#endif
+
 #endif

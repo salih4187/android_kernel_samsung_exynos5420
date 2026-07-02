@@ -581,6 +581,7 @@ int exynos5420_init_asv(struct asv_common *asv_info)
 		pr_err("EXYNOS5420 ASV : cannot find abb clock!\n");
 		return -EINVAL;
 	}
+	clk_prepare(clk_abb);
 	clk_enable(clk_abb);
 
 	chip_id3_value = __raw_readl(CHIP_ID3_REG);

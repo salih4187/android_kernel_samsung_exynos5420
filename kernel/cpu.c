@@ -18,6 +18,10 @@
 #include <linux/suspend.h>
 #include <mach/sec_debug.h>
 
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+#include <mach/cpufreq.h>
+#endif
+
 #ifdef CONFIG_SMP
 /* Serializes the updates to cpu_online_mask, cpu_present_mask */
 static DEFINE_MUTEX(cpu_add_remove_lock);
@@ -438,6 +442,16 @@ void __weak arch_disable_nonboot_cpus_end(void)
 int disable_nonboot_cpus(void)
 {
 	int cpu, first_cpu, error = 0;
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+	int lated_cpu;
+#endif
+
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+	if (exynos_boot_cluster == CA7)
+		lated_cpu = NR_CA7;
+	else
+		lated_cpu = NR_CA15;
+#endif
 
 	cpu_maps_update_begin();
 	first_cpu = cpumask_first(cpu_online_mask);
@@ -450,7 +464,11 @@ int disable_nonboot_cpus(void)
 
 	printk("Disabling non-boot CPUs ...\n");
 	for_each_online_cpu(cpu) {
+#if defined(CONFIG_ARM_EXYNOS_MP_CPUFREQ)
+		if (cpu == first_cpu || cpu == lated_cpu)
+#else
 		if (cpu == first_cpu)
+#endif
 			continue;
 		error = _cpu_down(cpu, 1);
 		if (!error)
@@ -461,6 +479,17 @@ int disable_nonboot_cpus(void)
 			break;
 		}
 	}
+
+#ifdef CONFIG_ARM_EXYNOS_MP_CPUFREQ
+	if (num_online_cpus() > 1) {
+		error = _cpu_down(lated_cpu, 1);
+		if (!error)
+			cpumask_set_cpu(lated_cpu, frozen_cpus);
+		else
+			printk(KERN_ERR "Error taking CPU%d down: %d\n",
+				lated_cpu, error);
+	}
+#endif
 
 	arch_disable_nonboot_cpus_end();
 

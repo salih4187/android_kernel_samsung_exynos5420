@@ -47,6 +47,7 @@ obj-$(CONFIG_ARM_S5PV210_CPUFREQ)	+= s5pv210-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS_CPUFREQ)	+= exynos-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS_IKS_CORE)	+= exynos-iks-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS_IKS_CLUSTER)	+= exynos-ikcs-cpufreq.o
+obj-$(CONFIG_ARM_EXYNOS_MP_CPUFREQ)	+= exynos-mp-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS4210_CPUFREQ)	+= exynos4210-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS4X12_CPUFREQ)	+= exynos4x12-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS5250_CPUFREQ)	+= exynos5250-cpufreq.o

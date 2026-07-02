@@ -15,6 +15,7 @@
 #include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/sort.h>
+#include <linux/reboot.h>
 
 #include <linux/fs.h>
 #include <asm/segment.h>
@@ -24,10 +25,14 @@
 #include <mach/cpufreq.h>
 #include <linux/suspend.h>
 
-#define	COLD_THRESHOLD	20
-#define NORMALMAX_FREQ	1900000
+#if defined(CONFIG_SOC_EXYNOS5260)
+#define NORMALMIN_FREQ	1000000
+#else
 #define NORMALMIN_FREQ	250000
+#endif
 #define POLLING_MSEC	100
+
+#define NR_CA7 4
 
 struct cpu_load_info {
 	cputime64_t cpu_idle;
@@ -38,21 +43,123 @@ struct cpu_load_info {
 
 static DEFINE_PER_CPU(struct cpu_load_info, cur_cpu_info);
 static DEFINE_MUTEX(dm_hotplug_lock);
+static DEFINE_MUTEX(thread_lock);
+static DEFINE_MUTEX(big_hotplug_lock);
 
+static struct task_struct *dm_hotplug_task;
 static int cpu_util[NR_CPUS];
 static struct pm_qos_request max_cpu_qos_hotplug;
 static unsigned int cur_load_freq = 0;
-static bool lcd_is_on;
+static bool lcd_is_on = true;
+static bool in_low_power_mode = false;
+static bool in_suspend_prepared = false;
+static bool do_enable_hotplug = false;
+static bool do_disable_hotplug = false;
+#if defined(CONFIG_SCHED_HMP)
+static bool do_hotplug_out = false;
+static int big_hotpluged = 0;
+#endif
 
-enum hotplug_mode {
-	CHP_NORMAL,
-	CHP_LOW_POWER,
+enum hotplug_cmd {
+	CMD_NORMAL,
+	CMD_LOW_POWER,
+	CMD_BIG_IN,
+	CMD_BIG_OUT,
 };
 
-static enum hotplug_mode prev_mode;
+static int on_run(void *data);
+static int dynamic_hotplug(enum hotplug_cmd cmd);
+
+static enum hotplug_cmd prev_cmd = CMD_NORMAL;
+static enum hotplug_cmd exe_cmd;
 static unsigned int delay = POLLING_MSEC;
 
-static bool exynos_dm_hotplug_disable;
+#if defined(CONFIG_SCHED_HMP)
+static struct workqueue_struct *hotplug_wq;
+#endif
+
+static int dm_hotplug_disable = 0;
+
+static bool exynos_dm_hotplug_disabled(void)
+{
+	return dm_hotplug_disable;
+}
+
+static void exynos_dm_hotplug_enable(void)
+{
+	mutex_lock(&dm_hotplug_lock);
+	if (!exynos_dm_hotplug_disabled()) {
+		pr_warn("%s: dynamic hotplug already enabled\n",
+				__func__);
+		mutex_unlock(&dm_hotplug_lock);
+		return;
+	}
+	dm_hotplug_disable--;
+	mutex_unlock(&dm_hotplug_lock);
+}
+
+static void exynos_dm_hotplug_disable(void)
+{
+	mutex_lock(&dm_hotplug_lock);
+	dm_hotplug_disable++;
+	mutex_unlock(&dm_hotplug_lock);
+}
+
+#ifdef CONFIG_PM
+static ssize_t show_enable_dm_hotplug(struct kobject *kobj,
+				struct attribute *attr, char *buf)
+{
+	bool disabled = exynos_dm_hotplug_disabled();
+
+	return snprintf(buf, 10, "%s\n", disabled ? "disabled" : "enabled");
+}
+
+static ssize_t store_enable_dm_hotplug(struct kobject *kobj, struct attribute *attr,
+					const char *buf, size_t count)
+{
+	int enable_input;
+
+	if (!sscanf(buf, "%d", &enable_input))
+		return -EINVAL;
+
+	if (enable_input > 1 || enable_input < 0) {
+		pr_err("%s: invalid value (%d)\n", __func__, enable_input);
+		return -EINVAL;
+	}
+
+	if (enable_input) {
+		do_enable_hotplug = true;
+
+		if (exynos_dm_hotplug_disabled())
+			exynos_dm_hotplug_enable();
+		else
+			pr_info("%s: dynamic hotplug already enabled\n",
+					__func__);
+
+#if defined(CONFIG_SCHED_HMP)
+		if (big_hotpluged)
+			dynamic_hotplug(CMD_BIG_OUT);
+#endif
+		do_enable_hotplug = false;
+	} else {
+		do_disable_hotplug = true;
+		if (!dynamic_hotplug(CMD_NORMAL))
+			prev_cmd = CMD_NORMAL;
+		if (!exynos_dm_hotplug_disabled())
+			exynos_dm_hotplug_disable();
+		else
+			pr_info("%s: dynamic hotplug already disabled\n",
+					__func__);
+		do_disable_hotplug = false;
+	}
+
+	return count;
+}
+
+static struct global_attr enable_dm_hotplug =
+		__ATTR(enable_dm_hotplug, S_IRUGO | S_IWUSR,
+			show_enable_dm_hotplug, store_enable_dm_hotplug);
+#endif
 
 static inline u64 get_cpu_idle_time_jiffy(unsigned int cpu, u64 *wall)
 {
@@ -129,6 +236,7 @@ static int fb_state_change(struct notifier_block *nb,
 		 * turned on.
 		 */
 		lcd_is_on = true;
+		pr_info("LCD is on\n");
 		break;
 	default:
 		break;
@@ -141,78 +249,227 @@ static struct notifier_block fb_block = {
 	.notifier_call = fb_state_change,
 };
 
-static int __ref __cpu_hotplug(struct cpumask *be_out_cpus)
+static int __ref __cpu_hotplug(bool out_flag, enum hotplug_cmd cmd)
 {
 	int i = 0;
 	int ret = 0;
 
-	mutex_lock(&dm_hotplug_lock);
-	if (exynos_dm_hotplug_disable ||
-			cpumask_weight(be_out_cpus) >= NR_CPUS) {
-		ret = -EPERM;
-		goto out;
-	}
+	if (exynos_dm_hotplug_disabled())
+		return 0;
 
-	mutex_lock(&cpufreq_lock);
-	for (i=1; i < NR_CPUS; i++) {
-		if (cpumask_test_cpu(i, be_out_cpus)) {
-			ret = cpu_down(i);
-			if (ret)
-				break;
+#if defined(CONFIG_SCHED_HMP)
+	if (out_flag) {
+		if (do_disable_hotplug)
+			goto blk_out;
+
+		if (cmd == CMD_BIG_OUT && !in_low_power_mode) {
+			for (i = setup_max_cpus - 1; i >= NR_CA7; i--) {
+				if (cpu_online(i)) {
+					ret = cpu_down(i);
+					if (ret)
+						goto blk_out;
+				}
+			}
 		} else {
-			ret = cpu_up(i);
-			if (ret)
-				break;
+			for (i = setup_max_cpus - 1; i > 0; i--) {
+				if (cpu_online(i)) {
+					ret = cpu_down(i);
+					if (ret)
+						goto blk_out;
+				}
+			}
+		}
+	} else {
+		if (in_suspend_prepared)
+			goto blk_out;
+
+		if (cmd == CMD_BIG_IN) {
+			if (in_low_power_mode)
+				goto blk_out;
+
+			for (i = NR_CA7; i < setup_max_cpus; i++) {
+				if (!cpu_online(i)) {
+					ret = cpu_up(i);
+					if (ret)
+						goto blk_out;
+				}
+			}
+		} else {
+			if (big_hotpluged && !do_disable_hotplug) {
+				for (i = 1; i < NR_CA7; i++) {
+					if (!cpu_online(i)) {
+						ret = cpu_up(i);
+						if (ret)
+							goto blk_out;
+					}
+				}
+			} else {
+				for (i = 1; i < setup_max_cpus; i++) {
+					if (do_hotplug_out && i >= NR_CA7)
+						goto blk_out;
+
+					if (!cpu_online(i)) {
+						ret = cpu_up(i);
+						if (ret)
+							goto blk_out;
+					}
+				}
+			}
 		}
 	}
-	mutex_unlock(&cpufreq_lock);
-out:
+#else
+	if (out_flag) {
+		if (do_disable_hotplug)
+			goto blk_out;
+
+		for (i = setup_max_cpus - 1; i > 0; i--) {
+			if (cpu_online(i)) {
+				ret = cpu_down(i);
+				if (ret)
+					goto blk_out;
+			}
+		}
+	} else {
+		if (in_suspend_prepared)
+			goto blk_out;
+
+		for (i = 1; i < setup_max_cpus; i++) {
+			if (!cpu_online(i)) {
+				ret = cpu_up(i);
+				if (ret)
+					goto blk_out;
+			}
+		}
+	}
+#endif
+
+blk_out:
+	return ret;
+}
+
+static int dynamic_hotplug(enum hotplug_cmd cmd)
+{
+	int ret = 0;
+
+	mutex_lock(&dm_hotplug_lock);
+
+	switch (cmd) {
+	case CMD_LOW_POWER:
+		ret = __cpu_hotplug(true, cmd);
+		in_low_power_mode = true;
+		break;
+	case CMD_BIG_OUT:
+		ret = __cpu_hotplug(true, cmd);
+		break;
+	case CMD_BIG_IN:
+		ret = __cpu_hotplug(false, cmd);
+		break;
+	case CMD_NORMAL:
+		ret = __cpu_hotplug(false, cmd);
+		in_low_power_mode = false;
+		break;
+	}
 
 	mutex_unlock(&dm_hotplug_lock);
 
 	return ret;
 }
 
-static int dynamic_hotplug(enum hotplug_mode mode)
+#if defined(CONFIG_SCHED_HMP)
+int big_cores_hotplug(bool out_flag)
 {
-	int i;
-	struct cpumask out_target;
-	enum hotplug_mode ret = 0;
+	int ret = 0;
 
-	cpumask_clear(&out_target);
+	mutex_lock(&big_hotplug_lock);
 
-	switch (mode) {
-	case CHP_LOW_POWER:
-		delay = POLLING_MSEC;
-		for (i=1; i < NR_CPUS; i++)
-			cpumask_set_cpu(i, &out_target);
-		ret = __cpu_hotplug(&out_target);
-		break;
-	case CHP_NORMAL:
-	default:
-		delay = POLLING_MSEC;
-		if (cpumask_weight(cpu_online_mask) < NR_CPUS)
-			ret = __cpu_hotplug(&out_target);
-		break;
+	if (out_flag) {
+		do_hotplug_out = true;
+		if (big_hotpluged) {
+			big_hotpluged++;
+			do_hotplug_out = false;
+			goto out;
+		}
+
+		ret = dynamic_hotplug(CMD_BIG_OUT);
+		if (!ret) {
+			big_hotpluged++;
+			do_hotplug_out = false;
+		}
+	} else {
+		if (WARN_ON(!big_hotpluged)) {
+			pr_err("%s: big cores already hotplug in\n",
+					__func__);
+			ret = -EINVAL;
+			goto out;
+		}
+
+		if (big_hotpluged > 1) {
+			big_hotpluged--;
+			goto out;
+		}
+
+		ret = dynamic_hotplug(CMD_BIG_IN);
+		if (!ret)
+			big_hotpluged--;
 	}
+
+out:
+	mutex_unlock(&big_hotplug_lock);
 
 	return ret;
 }
+
+static void event_hotplug_in_work(struct work_struct *work)
+{
+	if (!dynamic_hotplug(CMD_NORMAL))
+		prev_cmd = CMD_NORMAL;
+	else
+		pr_err("%s: failed hotplug in\n", __func__);
+}
+
+static DECLARE_WORK(hotplug_in_work, event_hotplug_in_work);
+
+void event_hotplug_in(void)
+{
+	if (hotplug_wq)
+		queue_work(hotplug_wq, &hotplug_in_work);
+}
+#endif
 
 static int exynos_dm_hotplug_notifier(struct notifier_block *notifier,
 					unsigned long pm_event, void *v)
 {
 	switch (pm_event) {
 	case PM_SUSPEND_PREPARE:
-		mutex_lock(&dm_hotplug_lock);
-		exynos_dm_hotplug_disable = true;
-		mutex_unlock(&dm_hotplug_lock);
+		mutex_lock(&thread_lock);
+		in_suspend_prepared = true;
+		if (!dynamic_hotplug(CMD_LOW_POWER))
+			prev_cmd = CMD_LOW_POWER;
+		exynos_dm_hotplug_disable();
+		if (dm_hotplug_task) {
+			kthread_stop(dm_hotplug_task);
+			dm_hotplug_task = NULL;
+		}
+		mutex_unlock(&thread_lock);
 		break;
 
 	case PM_POST_SUSPEND:
-		mutex_lock(&dm_hotplug_lock);
-		exynos_dm_hotplug_disable = false;
-		mutex_unlock(&dm_hotplug_lock);
+		mutex_lock(&thread_lock);
+		exynos_dm_hotplug_enable();
+
+		dm_hotplug_task =
+			kthread_create(on_run, NULL, "thread_hotplug");
+		if (IS_ERR(dm_hotplug_task)) {
+			mutex_unlock(&thread_lock);
+			pr_err("Failed in creation of thread.\n");
+			return -EINVAL;
+		}
+
+		in_suspend_prepared = false;
+
+		wake_up_process(dm_hotplug_task);
+
+		mutex_unlock(&thread_lock);
 		break;
 	}
 
@@ -224,20 +481,51 @@ static struct notifier_block exynos_dm_hotplug_nb = {
 	.priority = 1,
 };
 
+static int exynos_dm_hotplut_reboot_notifier(struct notifier_block *this,
+				unsigned long code, void *_cmd)
+{
+	switch (code) {
+	case SYSTEM_POWER_OFF:
+	case SYS_RESTART:
+		mutex_lock(&thread_lock);
+		exynos_dm_hotplug_disable();
+		if (dm_hotplug_task) {
+			kthread_stop(dm_hotplug_task);
+			dm_hotplug_task = NULL;
+		}
+		mutex_unlock(&thread_lock);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block exynos_dm_hotplug_reboot_nb = {
+	.notifier_call = exynos_dm_hotplut_reboot_notifier,
+};
+
+
 static int low_stay = 0;
 
-static enum hotplug_mode diagnose_condition(void)
+static enum hotplug_cmd diagnose_condition(void)
 {
 	int ret;
+	unsigned int normal_min_freq;
 
-	ret = CHP_NORMAL;
+#if defined(CONFIG_SCHED_HMP) && defined(CONFIG_CPU_FREQ_GOV_INTERACTIVE)
+	normal_min_freq = cpufreq_interactive_get_hispeed_freq();
+#else
+	normal_min_freq = NORMALMIN_FREQ;
+#endif
 
-	if (cur_load_freq > NORMALMIN_FREQ)
+	ret = CMD_NORMAL;
+
+	if (cur_load_freq > normal_min_freq)
 		low_stay = 0;
-	else if (cur_load_freq <= NORMALMIN_FREQ && low_stay <= 5)
+	else if (cur_load_freq <= normal_min_freq && low_stay <= 5)
 		low_stay++;
 	if (low_stay > 5 && !lcd_is_on)
-		ret = CHP_LOW_POWER;
+		ret = CMD_LOW_POWER;
 
 	return ret;
 }
@@ -298,12 +586,10 @@ static void calc_load(void)
 	return;
 }
 
-static int thread_run_flag;
-
 static int on_run(void *data)
 {
 	int on_cpu = 0;
-	enum hotplug_mode exe_mode;
+	int ret;
 
 	struct cpumask thread_cpumask;
 
@@ -311,46 +597,100 @@ static int on_run(void *data)
 	cpumask_set_cpu(on_cpu, &thread_cpumask);
 	sched_setaffinity(0, &thread_cpumask);
 
-	prev_mode = CHP_NORMAL;
-	thread_run_flag = 1;
-
-	while (thread_run_flag) {
+	while (!kthread_should_stop()) {
 		calc_load();
-		exe_mode = diagnose_condition();
+		exe_cmd = diagnose_condition();
 
-		if (exe_mode != prev_mode) {
 #ifdef DM_HOTPLUG_DEBUG
-			pr_debug("frequency info : %d, %s\n", cur_load_freq
-				, (exe_mode<1)?"NORMAL":((exe_mode<2)?"LOW":"HIGH"));
+		pr_info("frequency info : %d, prev_cmd %d, exe_cmd %d\n",
+				cur_load_freq, prev_cmd, exe_cmd);
+		pr_info("lcd is on : %d, low power mode = %d, dm_hotplug disable = %d\n",
+				lcd_is_on, in_low_power_mode, exynos_dm_hotplug_disabled());
 #endif
-			if (dynamic_hotplug(exe_mode) < 0)
-				exe_mode = prev_mode;
+		if (exynos_dm_hotplug_disabled())
+			goto sleep;
+
+		if (prev_cmd != exe_cmd) {
+			ret = dynamic_hotplug(exe_cmd);
+			if (ret < 0) {
+				if (ret == -EBUSY)
+					goto sleep;
+				else
+					goto failed_out;
+			}
 		}
 
-		prev_mode = exe_mode;
-		msleep(delay);
+		prev_cmd = exe_cmd;
+
+sleep:
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout_interruptible(msecs_to_jiffies(delay));
+		set_current_state(TASK_RUNNING);
 	}
 
+	pr_info("stopped %s\n", dm_hotplug_task->comm);
+
 	return 0;
+
+failed_out:
+	panic("%s: failed dynamic hotplug (exe_cmd %d)\n", __func__, exe_cmd);
 }
 
-void dm_cpu_hotplug_exit(void)
+#if defined(CONFIG_SCHED_HMP)
+bool is_big_hotpluged(void)
 {
-	thread_run_flag = 0;
+	return big_hotpluged ? true : false;
 }
+#endif
 
-void dm_cpu_hotplug_init(void)
+static int __init dm_cpu_hotplug_init(void)
 {
-	struct task_struct *k;
+	int ret = 0;
 
-	k = kthread_run(&on_run, NULL, "thread_hotplug_func");
-	if (IS_ERR(k))
+	dm_hotplug_task =
+		kthread_create(on_run, NULL, "thread_hotplug");
+	if (IS_ERR(dm_hotplug_task)) {
 		pr_err("Failed in creation of thread.\n");
+		return -EINVAL;
+	}
 
 	fb_register_client(&fb_block);
-	lcd_is_on = true;
 
-	exynos_dm_hotplug_disable = false;
+#ifdef CONFIG_PM
+	ret = sysfs_create_file(power_kobj, &enable_dm_hotplug.attr);
+	if (ret) {
+		pr_err("%s: failed to create enable_dm_hotplug sysfs interface\n",
+			__func__);
+		goto err_enable_dm_hotplug;
+	}
+#endif
+
+#if defined(CONFIG_SCHED_HMP)
+        hotplug_wq = create_singlethread_workqueue("event-hotplug");
+        if (!hotplug_wq) {
+                ret = -ENOMEM;
+                goto err_wq;
+        }
+#endif
 
 	register_pm_notifier(&exynos_dm_hotplug_nb);
+	register_reboot_notifier(&exynos_dm_hotplug_reboot_nb);
+
+	wake_up_process(dm_hotplug_task);
+
+	return ret;
+
+#if defined(CONFIG_SCHED_HMP)
+err_wq:
+#endif
+#ifdef CONFIG_PM
+	sysfs_remove_file(power_kobj, &enable_dm_hotplug.attr);
+#endif
+err_enable_dm_hotplug:
+	fb_unregister_client(&fb_block);
+	kthread_stop(dm_hotplug_task);
+
+	return ret;
 }
+
+late_initcall(dm_cpu_hotplug_init);

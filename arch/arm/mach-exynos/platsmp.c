@@ -87,6 +87,10 @@ void __cpuinit platform_secondary_init(unsigned int cpu)
 	 */
 	write_pen_release(-1);
 
+#ifdef CONFIG_EXYNOS5_MP
+	cpu = cpu ^ 0x4;
+#endif
+
 #ifdef CONFIG_ARM_TRUSTZONE
 	clear_boot_flag(cpu, HOTPLUG);
 #endif
@@ -130,12 +134,13 @@ void change_all_power_base_to(unsigned int cluster)
 	}
 }
 
+#ifdef CONFIG_ARCH_EXYNOS4
 static int exynos_power_up_cpu(unsigned int cpu)
 {
 	unsigned int timeout;
 	unsigned int val;
+	unsigned int tmp;
 	void __iomem *power_base;
-	unsigned int cluster = (read_cpuid_mpidr() >> 8) & 0xf;
 
 	power_base = cpu_boot_info[cpu].power_base;
 	if (power_base == 0)
@@ -143,7 +148,10 @@ static int exynos_power_up_cpu(unsigned int cpu)
 
 	val = __raw_readl(power_base + 0x4);
 	if (!(val & EXYNOS_CORE_LOCAL_PWR_EN)) {
-		__raw_writel(EXYNOS_CORE_LOCAL_PWR_EN, power_base);
+		tmp = __raw_readl(power_base);
+		tmp |= (EXYNOS_CORE_LOCAL_PWR_EN);
+		tmp |= (EXYNOS_CORE_AUTOWAKEUP_EN);
+		__raw_writel(tmp, power_base);
 
 		/* wait max 10 ms until cpu is on */
 		timeout = 10;
@@ -164,21 +172,119 @@ static int exynos_power_up_cpu(unsigned int cpu)
 		}
 	}
 
+	return 0;
+}
+#elif defined(CONFIG_ARCH_EXYNOS5)
+#define ADDITIONAL_SWRESET	(1)
+static int exynos_power_up_cpu(unsigned int cpu)
+{
+	unsigned int timeout;
+	unsigned int val;
+	void __iomem *power_base;
+#ifndef CONFIG_EXYNOS5_MP
+	unsigned int cluster = (read_cpuid_mpidr() >> 8) & 0xf;
+#endif
+	unsigned int lpe_bits, lpe_bits_status, enabled = 0;
+	int i = 1;
+
+	power_base = cpu_boot_info[cpu].power_base;
+	if (power_base == 0)
+		return -EPERM;
+
+	val = __raw_readl(power_base + 0x4);
+
+	if (soc_is_exynos5260()) {
+		if (val & 0x40000)
+			enabled = 1;
+		else {
+			val = __raw_readl(power_base + 0x8);
+			if (val & EXYNOS5_USE_SC_COUNTER) {
+				val &= ~EXYNOS5_USE_SC_COUNTER;
+				val |= EXYNOS5_USE_SC_FEEDBACK;
+				__raw_writel(val, power_base + 0x8);
+			}
+			lpe_bits = 0x800F000F;
+			lpe_bits_status = 0x4000F;
+#ifndef CONFIG_ARM_TRUSTZONE
+			__raw_writel(0, cpu_boot_info[cpu].boot_base);
+#endif
+		}
+	} else {
+		if (val & EXYNOS_CORE_LOCAL_PWR_EN)
+			enabled = 1;
+		else {
+			lpe_bits = EXYNOS_CORE_LOCAL_PWR_EN;
+			lpe_bits_status = EXYNOS_CORE_LOCAL_PWR_EN;
+		}
+	}
+
+	if (!enabled) {
+		__raw_writel(lpe_bits, power_base);
+
+		/* wait max 10 ms until cpu is on */
+		timeout = 10;
+		while (timeout) {
+			val = __raw_readl(power_base + 0x4);
+
+			if ((val & lpe_bits_status) ==
+			     lpe_bits_status)
+				break;
+
+			mdelay(1);
+			timeout--;
+		}
+
+		if (timeout == 0) {
+			printk(KERN_ERR "cpu%d power up failed", cpu);
+
+			return -ETIMEDOUT;
+		}
+	}
+
+#ifdef CONFIG_EXYNOS5_MP
+	if (cpu < 4) {
+#else
 	if (cluster) {
+#endif
+		if (soc_is_exynos5260())
+			i = ADDITIONAL_SWRESET;
+repeat:
 		while(!__raw_readl(EXYNOS_PMU_SPARE2))
 			udelay(10);
 
 		udelay(10);
 
-		printk(KERN_DEBUG "cpu%d: SWRESET\n", cpu);
+		if (soc_is_exynos5260()) {
+			if (i > 0)
+				__raw_writel(0, EXYNOS_PMU_SPARE2);
 
-		val = ((1 << 20) | (1 << 8)) << cpu;
-		__raw_writel(val, EXYNOS_SWRESET);
+			val = __raw_readl(power_base + 0x4);
+			val |= (0xf << 8);
+			__raw_writel(val, power_base + 0x4);
+
+			pr_debug("cpu%d: SWRESEET\n", cpu);
+
+			__raw_writel((0x1 << 1), power_base + 0xc);
+			printk(KERN_DEBUG "cpu%d: SWRESEET %d\n", cpu, i);
+			if (i > 0) {
+				i--;
+				goto repeat;
+			}
+			printk(KERN_DEBUG "cpu%d: SWRESEET %d\n", cpu, i);
+		} else {
+			printk(KERN_DEBUG "cpu%d: SWRESET\n", cpu);
+
+			val = ((1 << 20) | (1 << 8)) << cpu;
+			__raw_writel(val, EXYNOS_SWRESET);
+		}
 	}
 
 	return 0;
 }
 
+#else
+#error "exynos_power_up_cpu() does not defined"
+#endif
 int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 	unsigned long timeout;
@@ -221,13 +327,6 @@ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
 	while (time_before(jiffies, timeout)) {
 		smp_rmb();
 
-#ifdef CONFIG_ARM_TRUSTZONE
-		if (soc_is_exynos4210() || soc_is_exynos4212() ||
-			soc_is_exynos5250())
-			exynos_smc(SMC_CMD_CPU1BOOT, 0, 0, 0);
-		else if (soc_is_exynos4412())
-			exynos_smc(SMC_CMD_CPU1BOOT, cpu, 0, 0);
-#endif
 		__raw_writel(virt_to_phys(exynos4_secondary_startup),
 			cpu_boot_info[cpu].boot_base);
 
@@ -236,7 +335,7 @@ int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
 			watchdog_restore();
 #endif
 
-		if (soc_is_exynos5410() || soc_is_exynos5420())
+		if (soc_is_exynos5410() || soc_is_exynos5420() || soc_is_exynos5260())
 			dsb_sev();
 		else
 			arm_send_ping_ipi(cpu);
@@ -266,11 +365,25 @@ void __init smp_init_cpus(void)
 	void __iomem *scu_base = scu_base_addr();
 	unsigned int i, ncores;
 
-	if (soc_is_exynos4210() || soc_is_exynos4212() ||
-	    soc_is_exynos5250())
+	if (soc_is_exynos4210() || soc_is_exynos4212() || soc_is_exynos5250())
 		ncores = 2;
-	else if (soc_is_exynos4412() || soc_is_exynos5410() || soc_is_exynos5420())
+	else if (soc_is_exynos4412() || soc_is_exynos5410())
 		ncores = 4;
+	else if (soc_is_exynos5260())
+#ifdef CONFIG_EXYNOS5_MP
+		ncores = NR_CPUS;
+#else
+		ncores = read_cpuid_mpidr() & 0x100 ? 4 : 2;
+#endif
+	else if (soc_is_exynos5420())
+#ifdef CONFIG_EXYNOS5_MP
+	{
+		ncores = 8;
+		__raw_writel(0x4, S5P_VA_SYSRAM_NS + 0x28);
+	}
+#else
+		ncores = 4;
+#endif
 	else
 		ncores = scu_base ? scu_get_core_count(scu_base) : 1;
 
@@ -291,9 +404,6 @@ void __init platform_smp_prepare_cpus(unsigned int max_cpus)
 {
 	int i;
 
-	if (soc_is_exynos4210() || soc_is_exynos4212() || soc_is_exynos4412())
-		scu_enable(scu_base_addr());
-
 	for (i = 1; i < max_cpus; i++) {
 		int pwr_offset = 0;
 
@@ -307,9 +417,17 @@ void __init platform_smp_prepare_cpus(unsigned int max_cpus)
 		else
 			cpu_boot_info[i].boot_base = S5P_VA_SYSRAM;
 #endif
-		if (soc_is_exynos4412())
-			cpu_boot_info[i].boot_base += (0x4 * i);
-		else if (soc_is_exynos5410()) {
+		if (soc_is_exynos5260()) {
+			int cluster_id = read_cpuid_mpidr() & 0x100;
+#ifndef CONFIG_ARM_TRUSTZONE
+			if (cluster_id)
+				cpu_boot_info[i].boot_base += (0x4 * i);
+			else
+				cpu_boot_info[i].boot_base += (0x10 + 0x4 * i);
+#endif
+			if (cluster_id != 0)
+				pwr_offset = 4;
+		} else if (soc_is_exynos5410()) {
 			int cluster_id = read_cpuid_mpidr() & 0x100;
 			if (samsung_rev() < EXYNOS5410_REV_1_0) {
 				if (cluster_id == 0)
@@ -328,6 +446,10 @@ void __init platform_smp_prepare_cpus(unsigned int max_cpus)
 		}
 
 		cpu_boot_info[i].power_base =
+#ifdef CONFIG_EXYNOS5_MP
+			EXYNOS_ARM_CORE_CONFIGURATION(i ^ 4);
+#else
 			EXYNOS_ARM_CORE_CONFIGURATION(i + pwr_offset);
+#endif
 	}
 }

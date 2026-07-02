@@ -161,7 +161,7 @@ int __cpu_disable(void)
 	 * Flush user cache and TLB mappings, and then remove this CPU
 	 * from the vm mask set of all processes.
 	 */
-	flush_cache_all();
+
 	local_flush_tlb_all();
 
 	read_lock(&tasklist_lock);
@@ -247,6 +247,20 @@ static void __cpuinit smp_store_cpu_info(unsigned int cpuid)
 static void percpu_timer_setup(void);
 
 /*
+ * Skip the secondary calibration on architectures sharing clock
+ * with primary cpu. Archs can use ARCH_SKIP_SECONDARY_CALIBRATE
+ * for this.
+ */
+static inline int skip_secondary_calibrate(void)
+{
+#ifdef CONFIG_ARCH_SKIP_SECONDARY_CALIBRATE
+	return 0;
+#else
+	return -ENXIO;
+#endif
+}
+
+/*
  * This is the secondary CPU boot entry.  We're using this CPUs
  * idle thread stack, but a set of temporary page tables.
  */
@@ -285,7 +299,8 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 
 	notify_cpu_starting(cpu);
 
-	calibrate_delay();
+	if (skip_secondary_calibrate())
+		calibrate_delay();
 
 	smp_store_cpu_info(cpu);
 
@@ -705,13 +720,37 @@ static void flush_all_cpu_cache(void *info)
 	flush_dcache_level(flush_cache_level_cpu());
 }
 
+#ifdef CONFIG_EXYNOS5_MP
+
+#include <asm/cputype.h>
+#define INVALID_CPUID (0xff)
+
+static void flush_all_cluster_cache(void *info)
+{
+	flush_cache_all();
+}
+
 void flush_all_cpu_caches(void)
 {
-	unsigned long flags;
+	unsigned int cpu, other_cluster, other_first_cpu;
+
 	preempt_disable();
+
+	cpu = smp_processor_id();
+	other_cluster = (get_clusterid(cpu) == 0) ? 1 : 0;
+	other_first_cpu = get_first_cpuid(other_cluster);
+
 	smp_call_function(flush_all_cpu_cache, NULL, 1);
-	local_irq_save(flags);
+	smp_call_function_single(other_first_cpu, flush_all_cluster_cache, NULL, 1);
 	flush_cache_all();
-	local_irq_restore(flags);
 	preempt_enable();
 }
+#else
+void flush_all_cpu_caches(void)
+{
+	preempt_disable();
+	smp_call_function(flush_all_cpu_cache, NULL, 1);
+	flush_cache_all();
+	preempt_enable();
+}
+#endif

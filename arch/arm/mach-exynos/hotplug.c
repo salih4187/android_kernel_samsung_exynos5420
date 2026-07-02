@@ -20,7 +20,10 @@
 #include <asm/smp_plat.h>
 
 #include <plat/cpu.h>
+#include <plat/cci.h>
 #include <mach/regs-pmu.h>
+#include <mach/pmu.h>
+#include <mach/smc.h>
 
 extern volatile int pen_release;
 extern void change_power_base(unsigned int cpu, void __iomem *base);
@@ -98,9 +101,19 @@ static inline void cpu_leave_lowpower(void)
 	  : "cc");
 }
 
+#define L2_CCI_OFF	(1<<1)
+
 static void exynos_power_down_cpu(unsigned int cpu)
 {
 	void __iomem *power_base;
+
+#ifdef CONFIG_EXYNOS5_MP
+	struct cpumask mask;
+	int type;
+	int cluster_id = (read_cpuid_mpidr() >> 8) & 0xff;
+
+	power_base = EXYNOS_ARM_CORE_CONFIGURATION(cpu ^ 4);
+#else
 	unsigned int pwr_offset = 0;
 
 	set_boot_flag(cpu, HOTPLUG);
@@ -120,14 +133,36 @@ static void exynos_power_down_cpu(unsigned int cpu)
 		cluster_id = (cluster_id >> 8) & 0xf;
 		if (cluster_id)
 			pwr_offset = 4;
+	} else if (soc_is_exynos5260()) {
+		cpu ^= 4;
 	}
+
+	set_boot_flag(cpu, HOTPLUG);
 
 	power_base = EXYNOS_ARM_CORE_CONFIGURATION(cpu + pwr_offset);
 #ifdef CONFIG_EXYNOS5_CCI
-	change_power_base(cpu, power_base);
+	if (!soc_is_exynos5420())
+		change_power_base(cpu, power_base);
 #endif
-	__raw_writel(0, power_base);
+#endif
+	if (soc_is_exynos5260())
+		__raw_writel(0x80000000, power_base);
+	else
+		__raw_writel(0, power_base);
 
+#ifdef CONFIG_EXYNOS5_MP
+	type = !cpumask_and(&mask, cpu_online_mask, cpu_coregroup_mask(cpu));
+	if (type) {
+		if (soc_is_exynos5420())
+			__raw_writel(0, EXYNOS_COMMON_CONFIGURATION(cluster_id));
+	}
+#ifdef	CONFIG_ARM_TRUSTZONE
+	exynos_smc(SMC_CMD_SHUTDOWN,
+		  OP_TYPE_CLUSTER & type,
+		  SMC_POWERSTATE_IDLE,
+		  0);
+#endif
+#endif
 	return;
 }
 

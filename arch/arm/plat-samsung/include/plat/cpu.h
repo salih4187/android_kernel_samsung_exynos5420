@@ -143,6 +143,15 @@ IS_SAMSUNG_CPU(exynos5420, EXYNOS5420_SOC_ID, EXYNOS5_SOC_MASK)
 # define soc_is_exynos5250()	0
 #endif
 
+#if defined(CONFIG_SOC_EXYNOS5260)
+# define soc_is_exynos5260()	is_samsung_exynos5260()
+#else
+# define soc_is_exynos5260()	0
+#endif
+
+#define EXYNOS5260_REV_0	(0x0)
+#define EXYNOS5260_REV_1_0	(0x10)
+
 #if defined(CONFIG_SOC_EXYNOS5410)
 # define soc_is_exynos5410()	is_samsung_exynos5410()
 #else
@@ -164,6 +173,12 @@ IS_SAMSUNG_CPU(exynos5420, EXYNOS5420_SOC_ID, EXYNOS5_SOC_MASK)
 #define EXYNOS5420_REV_1_0	(0x10)
 #define EXYNOS5420_REV_2_0	(0x20)
 
+extern unsigned int samsung_chip_id[2];
+
+#define CHIPID0_OFFSET		(0x14)
+#define CHIPID1_OFFSET		(0x18)
+#define CHIPID_SIZE		(12)
+
 #define IODESC_ENT(x) { (unsigned long)S3C24XX_VA_##x, __phys_to_pfn(S3C24XX_PA_##x), S3C24XX_SZ_##x, MT_DEVICE }
 
 #ifndef MHZ
@@ -179,6 +194,7 @@ IS_SAMSUNG_CPU(exynos5420, EXYNOS5420_SOC_ID, EXYNOS5_SOC_MASK)
 #define C2_STATE	(1 << 3)
 #define CORE_SWITCH	(1 << 4)
 #define WAIT_FOR_OB_L2FLUSH (1 << 5)
+#define CHECK_CCI_SNOOP (1 << 7)
 
 #ifdef CONFIG_EXYNOS5_CCI
 #define SWITCH		CORE_SWITCH
